@@ -53,6 +53,41 @@ const setupTables = async () => {
       WriteCapacityUnits: 5
     }
   };
+  // Create Summaries table
+const summaryTableParams = {
+    TableName: process.env.SUMMARIES_TABLE || 'CodeSummaries',
+    KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],
+    AttributeDefinitions: [
+      { AttributeName: 'id', AttributeType: 'S' },
+      { AttributeName: 'sessionId', AttributeType: 'S' }
+    ],
+    GlobalSecondaryIndexes: [
+      {
+        IndexName: 'SessionIdIndex',
+        KeySchema: [{ AttributeName: 'sessionId', KeyType: 'HASH' }],
+        Projection: { ProjectionType: 'ALL' },
+        ProvisionedThroughput: {
+          ReadCapacityUnits: 5,
+          WriteCapacityUnits: 5
+        }
+      }
+    ],
+    ProvisionedThroughput: {
+      ReadCapacityUnits: 5,
+      WriteCapacityUnits: 5
+    }
+  };
+  
+  try {
+    await dynamodb.createTable(summaryTableParams).promise();
+    console.log(`Created table: ${summaryTableParams.TableName}`);
+  } catch (e) {
+    if (e.code === 'ResourceInUseException') {
+      console.log(`Table already exists: ${summaryTableParams.TableName}`);
+    } else {
+      console.error(`Error creating table ${summaryTableParams.TableName}:`, e);
+    }
+  }
 
   try {
     await dynamodb.createTable(userTableParams).promise();

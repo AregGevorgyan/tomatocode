@@ -1,4 +1,94 @@
+const CodeSummary = require('../models/codeSummary');
 const Session = require('../models/session');
+
+/**
+ * Get all code summaries for a session
+ * @route GET /api/sessions/:id/summaries
+ * @access Private (Teacher only)
+ */
+exports.getSessionSummaries = async (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const userId = req.user.id;
+    
+    // Verify the user is the teacher of this session
+    const sessionResult = await Session.getById(sessionId);
+    if (!sessionResult || !sessionResult.Item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    if (sessionResult.Item.createdBy !== userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only the teacher can access all summaries'
+      });
+    }
+    
+    // Get all summaries for this session
+    const summariesResult = await CodeSummary.getBySessionId(sessionId);
+    
+    res.status(200).json({
+      success: true,
+      summaries: summariesResult.Items || []
+    });
+  } catch (error) {
+    console.error('Error fetching session summaries:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve session summaries',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Get summaries for a specific student in a session
+ * @route GET /api/sessions/:id/users/:userId/summaries
+ * @access Private (Teacher or the student themselves)
+ */
+exports.getStudentSummaries = async (req, res) => {
+  try {
+    const sessionId = req.params.id;
+    const targetUserId = req.params.userId;
+    const requestingUserId = req.user.id;
+    
+    // Verify the session exists
+    const sessionResult = await Session.getById(sessionId);
+    if (!sessionResult || !sessionResult.Item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    // Check authorization - either teacher or the student themselves
+    if (requestingUserId !== sessionResult.Item.createdBy && 
+        requestingUserId !== targetUserId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Not authorized to access these summaries'
+      });
+    }
+    
+    // Get summaries for this student in this session
+    const summariesResult = await CodeSummary.getByStudentInSession(sessionId, targetUserId);
+    
+    res.status(200).json({
+      success: true,
+      summaries: summariesResult.Items || []
+    });
+  } catch (error) {
+    console.error('Error fetching student summaries:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve student summaries',
+      error: error.message
+    });
+  }
+};
 
 /**
  * Generate a random string of lowercase letters of given length.
