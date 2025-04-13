@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        padding: 20px;
+        text-align: center;
+      }
+      .message {
+        margin-bottom: 20px;
+        font-size: 20px;
+        color: #333;
+      }
+      button {
+        padding: 10px 20px;
+        background-color: #1a73e8;
+        color: white;
+        border: none;
+        border-radius: 7px;
+        font-size: 18px;
+        cursor: pointer;
+        transition: background-color 0.3s;
+      }
+      button:hover {
+        background-color: #0d5bba;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="message">
+      This will mark the current slide as a <strong>PearCode</strong> coding question.
+    </div>
+    <button onclick="confirmAdd()">Add to Slide</button>
+
+    <script>
+      function confirmAdd() {
+        const button = document.querySelector('button');
+        button.disabled = true;
+        button.textContent = 'Adding...';
+        
+        google.script.run
+          .withSuccessHandler(() => {
+            google.script.host.close();
+          })
+          .withFailureHandler((error) => {
+            button.disabled = false;
+            button.textContent = 'Add to Slide';
+            alert('Error: ' + error.message);
+          })
+          .addInteractiveSlideMarker();
+      }
+    </script>
+  </body>
+</html>
