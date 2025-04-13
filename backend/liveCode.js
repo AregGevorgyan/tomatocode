@@ -1,7 +1,33 @@
 const AWS = require('aws-sdk');
 const { VM } = require('vm2');
+const fs = require('fs');
+const { v4: uuidv4 } = require('uuid');
+const { exec } = require('child_process');
+const { promisify } = require('util');
+const path = require('path');
 const sessionController = require('./sessionController');
 const { configureDB } = require('./db');
+
+// Convert exec to promise-based with timeout
+const execPromise = (command, options = {}) => {
+  return new Promise((resolve, reject) => {
+    const process = exec(command, options, (error, stdout, stderr) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+    
+    // Handle timeout
+    if (options.timeout) {
+      setTimeout(() => {
+        process.kill();
+        reject(new Error(`Execution timed out after ${options.timeout}ms`));
+      }, options.timeout);
+    }
+  });
+};
 
 // Configure AWS
 AWS.config.update({ region: process.env.AWS_REGION || 'us-east-1' });
@@ -28,6 +54,12 @@ module.exports = function(io) {
   
   // Track periodic summary updates
   const summaryTimers = new Map();
+  
+  // Create temp directory if it doesn't exist
+  const tempDir = path.join(__dirname, 'temp');
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir);
+  }
   
   codeIO.on('connection', (socket) => {
     console.log(`New code socket connected: ${socket.id}`);
@@ -268,7 +300,7 @@ module.exports = function(io) {
           return;
         }
         
-        // Execute code (currently supports JavaScript only)
+        // Execute code (supports JavaScript and Python)
         let result = 'Code execution not implemented for this language';
         let error = null;
         
@@ -291,8 +323,10 @@ module.exports = function(io) {
         // for python execution
         if (language === 'python') {
           try {
+            // Create a unique filename for this execution
+            const tempFile = path.join(tempDir, `${uuidv4()}.py`);
+            
             // Write code to temp file
-            const tempFile = `/tmp/${uuidv4()}.py`;
             fs.writeFileSync(tempFile, code);
             
             // Execute with timeout
@@ -301,7 +335,11 @@ module.exports = function(io) {
             if (stderr) error = stderr;
             
             // Clean up
-            fs.unlinkSync(tempFile);
+            try {
+              fs.unlinkSync(tempFile);
+            } catch (cleanupError) {
+              console.warn('Failed to delete temp file:', cleanupError);
+            }
           } catch (execError) {
             error = execError.message;
             result = `Error: ${error}`;
