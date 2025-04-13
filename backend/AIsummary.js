@@ -1,7 +1,5 @@
-// Add to package.json: "type": "module"
-
-import { GoogleGenerativeAI } from "@google/generative-ai";
-import 'dotenv/config'
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+require('dotenv').config();
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
@@ -91,7 +89,7 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function evaluateSubmission(prompt, code) {
+async function evaluateSubmission(prompt, code) {
   try {
     return await analyzeStudentCode(prompt, code);
   } catch (error) {
@@ -99,3 +97,5 @@ export async function evaluateSubmission(prompt, code) {
     return defaultResponse();
   }
 }
+
+module.exports = { evaluateSubmission};

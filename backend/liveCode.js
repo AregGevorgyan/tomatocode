@@ -1,9 +1,8 @@
 const AWS = require('aws-sdk');
-const { VM } = require('vm2');
+const { VM, VMScript } = require('vm2');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const { exec } = require('child_process');
-const { promisify } = require('util');
 const path = require('path');
 const sessionController = require('./sessionController');
 const { configureDB } = require('./db');
@@ -11,6 +10,11 @@ const { configureDB } = require('./db');
 // Convert exec to promise-based with timeout
 const execPromise = (command, options = {}) => {
   return new Promise((resolve, reject) => {
+    // Stronger security: Only allow python command with specific parameters
+    if (!command.startsWith('python ') && !command.startsWith('python3 ')) {
+      return reject(new Error('Only Python execution is allowed'));
+    }
+    
     const process = exec(command, options, (error, stdout, stderr) => {
       if (error) {
         reject(error);
@@ -19,7 +23,7 @@ const execPromise = (command, options = {}) => {
       resolve({ stdout, stderr });
     });
     
-    // Handle timeout
+    // Handle timeout - prevent long-running processes
     if (options.timeout) {
       setTimeout(() => {
         process.kill();
@@ -34,14 +38,18 @@ AWS.config.update({ region: process.env.AWS_REGION || 'us-east-1' });
 const { docClient } = configureDB();
 const SESSIONS_TABLE = process.env.SESSIONS_TABLE || 'CodingSessions';
 
-// Import AI summary functionality (to be implemented)
-let generateCodeSummary;
+// Import AI summary functionality - fix the module name spelling
+let evaluateSubmission;
 try {
-  const AISummary = require('./AIsummery');
-  generateCodeSummary = AISummary.generateCodeSummary;
+  // Fixed: Correct module name spelling
+  const AISummary = require('./AIsummary');
+  evaluateSubmission = AISummary.evaluateSubmission;
 } catch (error) {
-  console.warn('AI summary module not found or incomplete, summaries will be disabled');
-  generateCodeSummary = async () => ({ summary: 'No summary available', progress: 'unknown' });
+  console.warn('AI summary module issue:', error.message);
+  evaluateSubmission = async (code, task) => ({ 
+    progress: "unknown",
+    feedback: "No summary available - AI module not loaded correctly"
+  });
 }
 
 /**
@@ -55,18 +63,60 @@ module.exports = function(io) {
   // Track periodic summary updates
   const summaryTimers = new Map();
   
-  // Create temp directory if it doesn't exist
+  // Create temp directory if it doesn't exist with secure permissions
   const tempDir = path.join(__dirname, 'temp');
   if (!fs.existsSync(tempDir)) {
-    fs.mkdirSync(tempDir);
+    fs.mkdirSync(tempDir, { mode: 0o700 }); // Secure permissions
+  }
+  
+  // Clean up any existing temp files at startup
+  try {
+    const files = fs.readdirSync(tempDir);
+    files.forEach(file => {
+      if (file.endsWith('.py')) {
+        try {
+          fs.unlinkSync(path.join(tempDir, file));
+        } catch (err) {
+          console.warn(`Could not delete temp file ${file}:`, err);
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error cleaning temp directory:', error);
   }
   
   codeIO.on('connection', (socket) => {
     console.log(`New code socket connected: ${socket.id}`);
     
+    // Set a timeout to disconnect idle sockets
+    const activityTimeout = setTimeout(() => {
+      socket.disconnect(true);
+    }, 3600000); // 1 hour
+    
+    // Function to reset the activity timeout
+    const resetTimeout = () => {
+      clearTimeout(activityTimeout);
+      socket.data.lastActive = new Date().toISOString();
+      socket.data.activityTimeout = setTimeout(() => {
+        socket.disconnect(true);
+      }, 3600000); // 1 hour
+    };
+    
+    // Keep track of the socket's activity
+    socket.use((_packet, next) => {
+      resetTimeout();
+      next();
+    });
+    
     // User joins a coding session with session code
     socket.on('join-session', async ({ sessionCode, name }) => {
       try {
+        // Input validation
+        if (!sessionCode || typeof sessionCode !== 'string' || !name || typeof name !== 'string') {
+          socket.emit('error', { message: 'Invalid session code or name format' });
+          return;
+        }
+        
         // Verify session exists
         const result = await docClient.get({
           TableName: SESSIONS_TABLE,
@@ -85,11 +135,11 @@ module.exports = function(io) {
         socket.data = { 
           name, 
           sessionCode,
-          isTeacher: false // Students join via session code
+          isTeacher: false, // Students join via session code
+          lastActive: new Date().toISOString()
         };
         
         // Add student to session directly using controller's method
-        // Use a simplified version of joinSession logic
         await docClient.update({
           TableName: SESSIONS_TABLE,
           Key: { sessionCode },
@@ -131,6 +181,12 @@ module.exports = function(io) {
     // Teacher creates and joins session (called after HTTP endpoint creates session)
     socket.on('teacher-join', async ({ sessionCode, name }) => {
       try {
+        // Input validation
+        if (!sessionCode || typeof sessionCode !== 'string' || !name || typeof name !== 'string') {
+          socket.emit('error', { message: 'Invalid session code or name format' });
+          return;
+        }
+        
         // Join the socket room
         socket.join(sessionCode);
         
@@ -138,7 +194,8 @@ module.exports = function(io) {
         socket.data = { 
           name, 
           sessionCode, 
-          isTeacher: true 
+          isTeacher: true,
+          lastActive: new Date().toISOString()
         };
         
         console.log(`Teacher ${name} joined session ${sessionCode}`);
@@ -164,6 +221,12 @@ module.exports = function(io) {
     // User updates code
     socket.on('code-update', async (data) => {
       try {
+        // Input validation
+        if (!data || typeof data !== 'object' || typeof data.code !== 'string') {
+          socket.emit('error', { message: 'Invalid code data format' });
+          return;
+        }
+        
         const { code } = data;
         const sessionCode = socket.data?.sessionCode;
         const name = socket.data?.name;
@@ -203,7 +266,7 @@ module.exports = function(io) {
               const task = sessionResult.Item?.currentTask || 'Coding task';
               
               // Generate AI summary
-              const summary = await generateCodeSummary(code, task);
+              const summary = await generateCodeSummary(task, code);
               
               // Store summary with student data
               await docClient.update({
@@ -243,6 +306,12 @@ module.exports = function(io) {
     // Teacher updates current slide
     socket.on('update-slide', async (data) => {
       try {
+        // Input validation
+        if (!data || typeof data !== 'object' || typeof data.slideIndex !== 'number') {
+          socket.emit('error', { message: 'Invalid slide data format' });
+          return;
+        }
+        
         const { slideIndex } = data;
         const sessionCode = socket.data?.sessionCode;
         
@@ -275,6 +344,11 @@ module.exports = function(io) {
     
     // Cursor position updates (for showing other users' cursors)
     socket.on('cursor-update', (data) => {
+      // Input validation
+      if (!data || typeof data !== 'object' || !data.position) {
+        return;
+      }
+      
       const { position } = data;
       const sessionCode = socket.data?.sessionCode;
       
@@ -291,6 +365,14 @@ module.exports = function(io) {
     // Code execution request
     socket.on('execute-code', async (data) => {
       try {
+        // Input validation
+        if (!data || typeof data !== 'object' || 
+            typeof data.code !== 'string' || 
+            typeof data.language !== 'string') {
+          socket.emit('error', { message: 'Invalid code execution data format' });
+          return;
+        }
+        
         const { code, language } = data;
         const sessionCode = socket.data?.sessionCode;
         const name = socket.data?.name;
@@ -304,37 +386,95 @@ module.exports = function(io) {
         let result = 'Code execution not implemented for this language';
         let error = null;
         
-        if (language === 'javascript') {
+        if (language.toLowerCase() === 'javascript') {
           try {
-            // Using VM2 for safer execution
+            // Using VM2 for safer execution with improved sandbox security
             const vm = new VM({
-              timeout: 1000,
-              sandbox: {}
+              timeout: 2000,
+              sandbox: {},
+              eval: false,
+              wasm: false,
+              fixAsync: true,
+              console: 'redirect'
             });
             
-            result = vm.run(code);
-            result = String(result);
+            // Add safe console methods to the sandbox
+            let consoleOutput = '';
+            vm.on('console.log', (...args) => {
+              consoleOutput += args.map(String).join(' ') + '\n';
+            });
+            
+            // Prevent access to dangerous globals
+            const script = new VMScript(`
+              (function() { 
+                "use strict";
+                const process = undefined;
+                const require = undefined;
+                const module = undefined;
+                const exports = undefined;
+                const __dirname = undefined;
+                const __filename = undefined;
+                const setTimeout = undefined;
+                const setInterval = undefined;
+                
+                ${code}
+                
+                return { result: eval("(" + ${JSON.stringify(code)} + ")"), consoleOutput };
+              })()
+            `);
+            
+            const output = vm.run(script);
+            result = consoleOutput;
+            
+            if (output && output.result !== undefined) {
+              result += "\n=> " + String(output.result);
+            }
           } catch (execError) {
             error = execError.message;
             result = `Error: ${error}`;
           }
         }
 
-        // for python execution
-        if (language === 'python') {
+        // for python execution with improved security
+        if (language.toLowerCase() === 'python') {
           try {
             // Create a unique filename for this execution
             const tempFile = path.join(tempDir, `${uuidv4()}.py`);
             
-            // Write code to temp file
-            fs.writeFileSync(tempFile, code);
+            // Set secure permissions
+            fs.writeFileSync(tempFile, code, { mode: 0o600 });
+            
+            // Execute with timeout and resource limits
+            // Use Python's resource module to limit memory and CPU
+            const limitedCode = `
+import resource, sys, os
+
+# Set resource limits
+resource.setrlimit(resource.RLIMIT_CPU, (2, 2))  # 2 seconds of CPU time
+resource.setrlimit(resource.RLIMIT_DATA, (50 * 1024 * 1024, 50 * 1024 * 1024))  # 50MB memory
+
+# Disable potentially dangerous modules
+sys.modules['os'].__dict__['system'] = None
+sys.modules['os'].__dict__['popen'] = None
+sys.modules['subprocess'] = None
+
+# Your code below
+${code}
+`;
+            
+            // Write the limited code to file
+            fs.writeFileSync(tempFile, limitedCode);
             
             // Execute with timeout
-            const { stdout, stderr } = await execPromise(`python ${tempFile}`, { timeout: 5000 });
+            const { stdout, stderr } = await execPromise(`python ${tempFile}`, { 
+              timeout: 5000,
+              maxBuffer: 1024 * 1024 // 1MB output limit
+            });
+            
             result = stdout;
             if (stderr) error = stderr;
             
-            // Clean up
+            // Clean up immediately
             try {
               fs.unlinkSync(tempFile);
             } catch (cleanupError) {
@@ -343,6 +483,15 @@ module.exports = function(io) {
           } catch (execError) {
             error = execError.message;
             result = `Error: ${error}`;
+            
+            // Ensure temp file is cleaned up even on error
+            try {
+              if (tempFile && fs.existsSync(tempFile)) {
+                fs.unlinkSync(tempFile);
+              }
+            } catch (cleanupError) {
+              console.warn('Failed to delete temp file on error:', cleanupError);
+            }
           }
         }
         
@@ -393,6 +542,11 @@ module.exports = function(io) {
     // User leaves or disconnects
     socket.on('disconnect', async () => {
       try {
+        // Clear the activity timeout
+        if (socket.data && socket.data.activityTimeout) {
+          clearTimeout(socket.data.activityTimeout);
+        }
+        
         const { sessionCode, name, isTeacher } = socket.data || {};
         console.log(`Socket disconnected: ${socket.id}, User: ${name || 'Unknown'}`);
         
@@ -454,7 +608,8 @@ module.exports = function(io) {
         if (studentData.code) {
           try {
             // Generate new summary
-            const summary = await generateCodeSummary(studentData.code, task);
+            // Note: Fixed order of parameters (task first, code second)
+            const summary = await generateCodeSummary(task, studentData.code);
             
             // Update in database
             await docClient.update({
@@ -485,6 +640,31 @@ module.exports = function(io) {
       console.error('Error in updateStudentSummaries:', error);
     }
   }
+  
+  // Clean up temp files periodically
+  setInterval(() => {
+    try {
+      const files = fs.readdirSync(tempDir);
+      const now = Date.now();
+      
+      files.forEach(file => {
+        if (file.endsWith('.py')) {
+          const filePath = path.join(tempDir, file);
+          try {
+            const stats = fs.statSync(filePath);
+            // Delete files older than 15 minutes
+            if (now - stats.mtimeMs > 15 * 60 * 1000) {
+              fs.unlinkSync(filePath);
+            }
+          } catch (err) {
+            console.warn(`Could not process temp file ${file}:`, err);
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Error cleaning temp directory:', error);
+    }
+  }, 15 * 60 * 1000); // Run every 15 minutes
   
   return codeIO;
 };
