@@ -32,39 +32,29 @@ const setupTables = async () => {
 
   const { dynamodb } = configureDB();
 
-  // Create Users table
-  const userTableParams = {
-    TableName: process.env.USERS_TABLE || 'Users',
-    KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],
-    AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }],
-    ProvisionedThroughput: {
-      ReadCapacityUnits: 5,
-      WriteCapacityUnits: 5
-    }
-  };
-
-  // Create Sessions table
+  // Create Sessions table with sessionCode as primary key
   const sessionTableParams = {
     TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
-    KeySchema: [{ AttributeName: 'sessionId', KeyType: 'HASH' }],
-    AttributeDefinitions: [{ AttributeName: 'sessionId', AttributeType: 'S' }],
+    KeySchema: [{ AttributeName: 'sessionCode', KeyType: 'HASH' }],
+    AttributeDefinitions: [{ AttributeName: 'sessionCode', AttributeType: 'S' }],
     ProvisionedThroughput: {
       ReadCapacityUnits: 5,
       WriteCapacityUnits: 5
     }
   };
-  // Create Summaries table
-const summaryTableParams = {
+  
+  // Create Summaries table keyed by unique summary ID with sessionCode GSI
+  const summaryTableParams = {
     TableName: process.env.SUMMARIES_TABLE || 'CodeSummaries',
     KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],
     AttributeDefinitions: [
       { AttributeName: 'id', AttributeType: 'S' },
-      { AttributeName: 'sessionId', AttributeType: 'S' }
+      { AttributeName: 'sessionCode', AttributeType: 'S' }
     ],
     GlobalSecondaryIndexes: [
       {
-        IndexName: 'SessionIdIndex',
-        KeySchema: [{ AttributeName: 'sessionId', KeyType: 'HASH' }],
+        IndexName: 'SessionCodeIndex',
+        KeySchema: [{ AttributeName: 'sessionCode', KeyType: 'HASH' }],
         Projection: { ProjectionType: 'ALL' },
         ProvisionedThroughput: {
           ReadCapacityUnits: 5,
@@ -86,17 +76,6 @@ const summaryTableParams = {
       console.log(`Table already exists: ${summaryTableParams.TableName}`);
     } else {
       console.error(`Error creating table ${summaryTableParams.TableName}:`, e);
-    }
-  }
-
-  try {
-    await dynamodb.createTable(userTableParams).promise();
-    console.log(`Created table: ${userTableParams.TableName}`);
-  } catch (e) {
-    if (e.code === 'ResourceInUseException') {
-      console.log(`Table already exists: ${userTableParams.TableName}`);
-    } else {
-      console.error(`Error creating table ${userTableParams.TableName}:`, e);
     }
   }
 

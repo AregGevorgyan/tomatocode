@@ -2,11 +2,11 @@ const express = require('express');
 const http = require('http');
 const socketIO = require('socket.io');
 const cors = require('cors');
-const { configureDB, setupTables } = require('./config/db');
+const { configureDB, setupTables } = require('./db');
 require('dotenv').config();
 
 // Import routes
-const sessionRouter = require('./routes/sessionRouter');
+const sessionRouter = require('./sessionRouter');
 const userRouter = require('./routes/userRoutes');
 
 // Create Express app and HTTP server
@@ -31,7 +31,7 @@ app.use('/api/sessions', sessionRouter);
 app.use('/api/users', userRouter);
 
 // Setup Socket.IO for live coding
-require('./sockets/liveCode')(io);
+require('./liveCode')(io);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
