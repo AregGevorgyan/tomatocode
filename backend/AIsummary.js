@@ -1,5 +1,3 @@
-// Add to package.json: "type": "module"
-
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import 'dotenv/config'
 
