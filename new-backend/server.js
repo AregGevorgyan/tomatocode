@@ -672,15 +672,15 @@ app.use((req, res) => {
 // ------------------------------------------------------------
 
 // Namespace for coding sessions
-const codeIO = io.of('/code');
+//const codeIO = io.of('/code');
 
 // Track periodic summary updates
 const summaryTimers = new Map();
 
 // Track session info for reconnection
 const sessionInfo = new Map();
-
-codeIO.on('connection', (socket) => {
+// changed form codeio
+io.on('connection', (socket) => {
   console.log(`New code socket connected: ${socket.id}`);
   
   // Use a timeout (30 minutes)
@@ -973,8 +973,8 @@ codeIO.on('connection', (socket) => {
         // Update student code
         await updateStudentCode(sessionCode, name, code);
         
-        // Get teacher sockets in this session
-        const teacherSockets = await codeIO.in(sessionCode).fetchSockets();
+        // Get teacher sockets in this session CHANGED 
+        const teacherSockets = await io.in(sessionCode).fetchSockets();
         const teachers = teacherSockets.filter(s => s.data?.isTeacher);
         
         // Send code update only to teachers
@@ -1062,9 +1062,9 @@ codeIO.on('connection', (socket) => {
       if (session.slides && session.slides[slideIndex]) {
         slidePrompt = session.slides[slideIndex].prompt || '';
       }
-      
+      // chaged form codeio
       // Broadcast slide change to all users with info about whether this slide has coding
-      codeIO.to(sessionCode).emit('slide-change', {
+      io.to(sessionCode).emit('slide-change', {
         index: slideIndex,
         timestamp: new Date().toISOString(),
         hasCodeEditor,
@@ -1267,8 +1267,8 @@ ${code}
       });
       
       // Send to teacher if from student
-      if (!socket.data.isTeacher) {
-        const teacherSockets = await codeIO.in(sessionCode).fetchSockets();
+      if (!socket.data.isTeacher) {//changed 
+        const teacherSockets = await io.in(sessionCode).fetchSockets();
         const teachers = teacherSockets.filter(s => s.data?.isTeacher);
         
         teachers.forEach(teacher => {
@@ -1302,9 +1302,9 @@ ${code}
         });
         
         // Special handling for teacher disconnect
-        if (isTeacher) {
+        if (isTeacher) {//changed
           // Check if this was the last teacher
-          const remainingSockets = await codeIO.in(sessionCode).fetchSockets();
+          const remainingSockets = await io.in(sessionCode).fetchSockets();
           const remainingTeachers = remainingSockets.filter(s => 
             s.data?.isTeacher && s.id !== socket.id
           );
@@ -1388,9 +1388,9 @@ async function updateStudentSummaries(sessionCode) {
         
         // Update in-memory database
         students[studentName].summary = summary;
-        
+        //changed
         // Broadcast to teachers
-        const teacherSockets = await codeIO.in(sessionCode).fetchSockets();
+        const teacherSockets = await io.in(sessionCode).fetchSockets();
         const teachers = teacherSockets.filter(s => s.data?.isTeacher);
         
         teachers.forEach(teacher => {
