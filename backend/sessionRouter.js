@@ -1,53 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const sessionController = require('./sessionController');
-const { getSession, createSession } = require('./sessionManager');
 
 // Create a new session (called from Google Slides App Script)
-router.post('/create', async (req, res) => {
-  try {
-    // Use options from request body if provided
-    const { title, description, language, initialCode } = req.body;
-    const session = await createSession({ title, description, language, initialCode });
-    
-    res.json({
-      success: true,
-      sessionCode: session.sessionCode
-    });
-  } catch (error) {
-    console.error('Failed to create session:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to create session'
-    });
-  }
-});
+router.post('/create', sessionController.createSession);
 
 // Get session by code
-router.get('/:sessionCode', async (req, res) => {
-  try {
-    const { sessionCode } = req.params;
-    const session = await getSession(sessionCode);
-    
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
-    }
-    
-    res.json({
-      success: true,
-      session
-    });
-  } catch (error) {
-    console.error('Error fetching session:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch session'
-    });
-  }
-});
+router.get('/:sessionCode', sessionController.getSessionByCode);
 
 // Update session information
 router.put('/:sessionCode', sessionController.updateSession);

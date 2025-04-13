@@ -1,90 +1,17 @@
-const { Session, CodeSummary } = require('./db');
+const { configureDB } = require('./db');
+const { v4: uuidv4 } = require('uuid');
+
+// Get DynamoDB document client
+const { docClient } = configureDB();
+const SESSIONS_TABLE = process.env.SESSIONS_TABLE || 'CodingSessions';
+const SUMMARIES_TABLE = process.env.SUMMARIES_TABLE || 'CodeSummaries';
 
 /**
- * Get all code summaries for a session
- * @route GET /api/sessions/:sessionCode/summaries
- * @access Public (Teacher only with session code)
- */
-exports.getSessionSummaries = async (req, res) => {
-  try {
-    const sessionCode = req.params.sessionCode;
-    
-    // Verify the session exists
-    const sessionResult = await Session.getById(sessionCode);
-    if (!sessionResult || !sessionResult.Item) {
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
-    }
-    
-    // Get all summaries for this session
-    const summariesResult = await CodeSummary.getBySessionId(sessionCode);
-    
-    res.status(200).json({
-      success: true,
-      summaries: summariesResult.Items || []
-    });
-  } catch (error) {
-    console.error('Error fetching session summaries:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve session summaries',
-      error: error.message
-    });
-  }
-};
-
-/**
- * Get summaries for a specific student in a session
- * @route GET /api/sessions/:sessionCode/students/:studentName/summaries
- * @access Public (With session code)
- */
-exports.getStudentSummaries = async (req, res) => {
-  try {
-    const sessionCode = req.params.sessionCode;
-    const studentName = req.params.studentName;
-    
-    // Verify the session exists
-    const sessionResult = await Session.getById(sessionCode);
-    if (!sessionResult || !sessionResult.Item) {
-      return res.status(404).json({
-        success: false,
-        message: 'Session not found'
-      });
-    }
-    
-    // Check if student exists in session
-    if (!sessionResult.Item.students || !sessionResult.Item.students[studentName]) {
-      return res.status(404).json({
-        success: false,
-        message: 'Student not found in this session'
-      });
-    }
-    
-    // Get summaries for this student in this session
-    const summariesResult = await CodeSummary.getByStudentInSession(sessionCode, studentName);
-    
-    res.status(200).json({
-      success: true,
-      summaries: summariesResult.Items || []
-    });
-  } catch (error) {
-    console.error('Error fetching student summaries:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve student summaries',
-      error: error.message
-    });
-  }
-};
-
-/**
- * Generate a random string of lowercase letters of given length.
+ * Generates a random string of lowercase letters of given length.
  * @param {number} length - Number of characters.
  * @returns {string} - Random lowercase string.
  */
-function generateRandomLowercase(length = 6) {
+const generateSessionCode = (length = 6) => {
   let result = '';
   const characters = 'abcdefghijklmnopqrstuvwxyz';
   const charactersLength = characters.length;
@@ -92,26 +19,27 @@ function generateRandomLowercase(length = 6) {
     result += characters.charAt(Math.floor(Math.random() * charactersLength));
   }
   return result;
-}
+};
 
 /**
- * Generate a unique session code that is 6 lowercase letters long.
- * This function checks the database to ensure that the generated code
- * does not already exist.
- * @returns {Promise<string>}
+ * Generate a unique session code that doesn't exist in the database
+ * @returns {Promise<string>} Unique session code
  */
-async function generateUniqueSessionCode() {
+const generateUniqueSessionCode = async () => {
   let code;
   let exists = true;
   do {
-    code = generateRandomLowercase(6);
-    const result = await Session.getById(code);
+    code = generateSessionCode();
+    const result = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode: code }
+    }).promise();
     if (!result || !result.Item) {
       exists = false;
     }
   } while (exists);
   return code;
-}
+};
 
 /**
  * Create a new session.
@@ -142,7 +70,10 @@ exports.createSession = async (req, res) => {
     };
 
     // Create the session in the database
-    await Session.create(sessionData);
+    await docClient.put({
+      TableName: SESSIONS_TABLE,
+      Item: sessionData
+    }).promise();
 
     // Send success response
     res.status(201).json({
@@ -168,13 +99,18 @@ exports.createSession = async (req, res) => {
 exports.getSessionByCode = async (req, res) => {
   try {
     const { sessionCode } = req.params;
-    const result = await Session.getById(sessionCode);
+    const result = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
+    
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
         message: 'Session not found'
       });
     }
+    
     res.status(200).json({
       success: true,
       session: result.Item
@@ -200,7 +136,11 @@ exports.updateSession = async (req, res) => {
     const updates = req.body;
     
     // Check if session exists
-    const result = await Session.getById(sessionCode);
+    const result = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
+    
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
@@ -208,8 +148,32 @@ exports.updateSession = async (req, res) => {
       });
     }
     
-    // Apply updates
-    await Session.update(sessionCode, updates);
+    // Build the update expression dynamically
+    let updateExpression = 'SET updatedAt = :updatedAt';
+    const expressionAttributeNames = {};
+    const expressionAttributeValues = {
+      ':updatedAt': new Date().toISOString()
+    };
+    
+    Object.entries(updates).forEach(([key, value], index) => {
+      // Skip reserved keys
+      if (['sessionCode', 'createdAt'].includes(key)) return;
+      
+      const attrName = `#attr${index}`;
+      const attrValue = `:val${index}`;
+      
+      updateExpression += `, ${attrName} = ${attrValue}`;
+      expressionAttributeNames[attrName] = key;
+      expressionAttributeValues[attrValue] = value;
+    });
+    
+    await docClient.update({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode },
+      UpdateExpression: updateExpression,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues
+    }).promise();
     
     res.status(200).json({
       success: true,
@@ -235,7 +199,11 @@ exports.deleteSession = async (req, res) => {
     const { sessionCode } = req.params;
     
     // Check if session exists
-    const result = await Session.getById(sessionCode);
+    const result = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
+    
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
@@ -243,7 +211,10 @@ exports.deleteSession = async (req, res) => {
       });
     }
     
-    await Session.delete(sessionCode);
+    await docClient.delete({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
     
     res.status(200).json({
       success: true,
@@ -276,7 +247,11 @@ exports.joinSession = async (req, res) => {
       });
     }
 
-    const result = await Session.getById(sessionCode);
+    const result = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
+    
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
@@ -292,7 +267,21 @@ exports.joinSession = async (req, res) => {
     }
     
     // Add student to session
-    await Session.addParticipant(sessionCode, studentName);
+    await docClient.update({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode },
+      UpdateExpression: 'SET students.#name = :studentData',
+      ExpressionAttributeNames: {
+        '#name': studentName
+      },
+      ExpressionAttributeValues: {
+        ':studentData': {
+          joinedAt: new Date().toISOString(),
+          code: '',
+          lastActive: new Date().toISOString()
+        }
+      }
+    }).promise();
     
     res.status(200).json({
       success: true,
@@ -318,7 +307,11 @@ exports.endSession = async (req, res) => {
   try {
     const { sessionCode } = req.params;
     
-    const result = await Session.getById(sessionCode);
+    const result = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
+    
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
@@ -326,7 +319,15 @@ exports.endSession = async (req, res) => {
       });
     }
     
-    await Session.update(sessionCode, { active: false });
+    await docClient.update({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode },
+      UpdateExpression: 'SET active = :active, updatedAt = :updatedAt',
+      ExpressionAttributeValues: { 
+        ':active': false,
+        ':updatedAt': new Date().toISOString()
+      }
+    }).promise();
     
     res.status(200).json({
       success: true,
@@ -350,8 +351,20 @@ exports.endSession = async (req, res) => {
 exports.updateCurrentSlide = async (req, res) => {
   try {
     const { sessionCode, slideIndex } = req.params;
+    const slideNum = parseInt(slideIndex, 10);
     
-    const result = await Session.getById(sessionCode);
+    if (isNaN(slideNum) || slideNum < 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid slide index'
+      });
+    }
+    
+    const result = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
+    
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
@@ -359,7 +372,15 @@ exports.updateCurrentSlide = async (req, res) => {
       });
     }
     
-    await Session.updateCurrentSlide(sessionCode, parseInt(slideIndex, 10));
+    await docClient.update({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode },
+      UpdateExpression: 'SET currentSlide = :slide, updatedAt = :updatedAt',
+      ExpressionAttributeValues: {
+        ':slide': slideNum,
+        ':updatedAt': new Date().toISOString()
+      }
+    }).promise();
     
     res.status(200).json({
       success: true,
@@ -374,3 +395,135 @@ exports.updateCurrentSlide = async (req, res) => {
     });
   }
 };
+
+/**
+ * Update student code in a session
+ * @param {string} sessionCode - Session code
+ * @param {string} studentName - Student name
+ * @param {string} code - Student's code
+ * @returns {Promise<boolean>} Success status
+ */
+exports.updateStudentCode = async (sessionCode, studentName, code) => {
+  try {
+    await docClient.update({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode },
+      UpdateExpression: 'SET students.#name.code = :code, students.#name.lastActive = :lastActive',
+      ExpressionAttributeNames: {
+        '#name': studentName
+      },
+      ExpressionAttributeValues: {
+        ':code': code,
+        ':lastActive': new Date().toISOString()
+      }
+    }).promise();
+    return true;
+  } catch (error) {
+    console.error('Error updating student code:', error);
+    return false;
+  }
+};
+
+/**
+ * Get all code summaries for a session
+ * @route GET /api/sessions/:sessionCode/summaries
+ * @access Public (Teacher only with session code)
+ */
+exports.getSessionSummaries = async (req, res) => {
+  try {
+    const { sessionCode } = req.params;
+    
+    // Verify the session exists
+    const sessionResult = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
+    
+    if (!sessionResult || !sessionResult.Item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    // Get all summaries for this session
+    const summariesResult = await docClient.query({
+      TableName: SUMMARIES_TABLE,
+      IndexName: 'SessionCodeIndex',
+      KeyConditionExpression: 'sessionCode = :code',
+      ExpressionAttributeValues: { ':code': sessionCode }
+    }).promise();
+    
+    res.status(200).json({
+      success: true,
+      summaries: summariesResult.Items || []
+    });
+  } catch (error) {
+    console.error('Error fetching session summaries:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve session summaries',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Get summaries for a specific student in a session
+ * @route GET /api/sessions/:sessionCode/students/:studentName/summaries
+ * @access Public (With session code)
+ */
+exports.getStudentSummaries = async (req, res) => {
+  try {
+    const { sessionCode, studentName } = req.params;
+    
+    // Verify the session exists
+    const sessionResult = await docClient.get({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionCode }
+    }).promise();
+    
+    if (!sessionResult || !sessionResult.Item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    // Check if student exists in session
+    if (!sessionResult.Item.students || !sessionResult.Item.students[studentName]) {
+      return res.status(404).json({
+        success: false,
+        message: 'Student not found in this session'
+      });
+    }
+    
+    // Get summaries for this student in this session
+    const summariesResult = await docClient.query({
+      TableName: SUMMARIES_TABLE,
+      IndexName: 'SessionCodeIndex',
+      KeyConditionExpression: 'sessionCode = :code',
+      FilterExpression: 'studentName = :name',
+      ExpressionAttributeValues: { 
+        ':code': sessionCode,
+        ':name': studentName 
+      }
+    }).promise();
+    
+    res.status(200).json({
+      success: true,
+      summaries: summariesResult.Items || []
+    });
+  } catch (error) {
+    console.error('Error fetching student summaries:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve student summaries',
+      error: error.message
+    });
+  }
+};
+
+// Export additional utility functions that liveCode.js might need
+exports.generateSessionCode = generateSessionCode;
+exports.generateUniqueSessionCode = generateUniqueSessionCode;

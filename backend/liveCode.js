@@ -1,10 +1,12 @@
 const AWS = require('aws-sdk');
 const { VM } = require('vm2');
-const { addStudentToSession, updateStudentCode, updateCurrentSlide } = require('./sessionManager');
+const sessionController = require('./sessionController');
+const { configureDB } = require('./db');
 
 // Configure AWS
 AWS.config.update({ region: process.env.AWS_REGION || 'us-east-1' });
-const docClient = new AWS.DynamoDB.DocumentClient();
+const { docClient } = configureDB();
+const SESSIONS_TABLE = process.env.SESSIONS_TABLE || 'CodingSessions';
 
 // Import AI summary functionality (to be implemented)
 let generateCodeSummary;
@@ -35,7 +37,7 @@ module.exports = function(io) {
       try {
         // Verify session exists
         const result = await docClient.get({
-          TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+          TableName: SESSIONS_TABLE,
           Key: { sessionCode }
         }).promise();
         
@@ -54,8 +56,24 @@ module.exports = function(io) {
           isTeacher: false // Students join via session code
         };
         
-        // Update DynamoDB with student data using session manager
-        await addStudentToSession(sessionCode, name, socket.id);
+        // Add student to session directly using controller's method
+        // Use a simplified version of joinSession logic
+        await docClient.update({
+          TableName: SESSIONS_TABLE,
+          Key: { sessionCode },
+          UpdateExpression: 'SET students.#name = :studentData',
+          ExpressionAttributeNames: {
+            '#name': name
+          },
+          ExpressionAttributeValues: {
+            ':studentData': {
+              joinedAt: new Date().toISOString(),
+              code: '',
+              socketId: socket.id,
+              lastActive: new Date().toISOString()
+            }
+          }
+        }).promise();
         
         // Send current session data to the joining user
         socket.emit('session-data', result.Item);
@@ -125,8 +143,8 @@ module.exports = function(io) {
         
         // Broadcast to teacher only if from student
         if (!socket.data.isTeacher) {
-          // Update student code in database
-          await updateStudentCode(sessionCode, name, code);
+          // Update student code in database using controller function
+          await sessionController.updateStudentCode(sessionCode, name, code);
           
           // Get teacher sockets in this session
           const teacherSockets = await codeIO.in(sessionCode).fetchSockets();
@@ -146,7 +164,7 @@ module.exports = function(io) {
             try {
               // Get session to find task description
               const sessionResult = await docClient.get({
-                TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+                TableName: SESSIONS_TABLE,
                 Key: { sessionCode }
               }).promise();
               
@@ -157,7 +175,7 @@ module.exports = function(io) {
               
               // Store summary with student data
               await docClient.update({
-                TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+                TableName: SESSIONS_TABLE,
                 Key: { sessionCode },
                 UpdateExpression: 'SET students.#name.summary = :summary',
                 ExpressionAttributeNames: { '#name': name },
@@ -179,7 +197,7 @@ module.exports = function(io) {
         } else {
           // If from teacher, update in database
           await docClient.update({
-            TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+            TableName: SESSIONS_TABLE,
             Key: { sessionCode },
             UpdateExpression: 'SET currentCode = :code',
             ExpressionAttributeValues: { ':code': code }
@@ -201,8 +219,16 @@ module.exports = function(io) {
           return;
         }
         
-        // Update slide in database
-        await updateCurrentSlide(sessionCode, slideIndex);
+        // Update slide in database using direct DB call (simpler for socket context)
+        await docClient.update({
+          TableName: SESSIONS_TABLE,
+          Key: { sessionCode },
+          UpdateExpression: 'SET currentSlide = :slide, updatedAt = :updatedAt',
+          ExpressionAttributeValues: {
+            ':slide': slideIndex,
+            ':updatedAt': new Date().toISOString()
+          }
+        }).promise();
         
         // Broadcast slide change to all users in the session
         codeIO.to(sessionCode).emit('slide-change', {
@@ -264,7 +290,7 @@ module.exports = function(io) {
         
         // Store execution result
         await docClient.update({
-          TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+          TableName: SESSIONS_TABLE,
           Key: { sessionCode },
           UpdateExpression: 'SET students.#name.lastExecution = :exec',
           ExpressionAttributeNames: { '#name': name },
@@ -335,7 +361,7 @@ module.exports = function(io) {
           } else {
             // Remove student from session if not teacher
             await docClient.update({
-              TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+              TableName: SESSIONS_TABLE,
               Key: { sessionCode },
               UpdateExpression: 'REMOVE students.#name',
               ExpressionAttributeNames: { '#name': name }
@@ -356,7 +382,7 @@ module.exports = function(io) {
     try {
       // Get session data
       const result = await docClient.get({
-        TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+        TableName: SESSIONS_TABLE,
         Key: { sessionCode }
       }).promise();
       
@@ -374,7 +400,7 @@ module.exports = function(io) {
             
             // Update in database
             await docClient.update({
-              TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+              TableName: SESSIONS_TABLE,
               Key: { sessionCode },
               UpdateExpression: 'SET students.#name.summary = :summary',
               ExpressionAttributeNames: { '#name': studentName },
