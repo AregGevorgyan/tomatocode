@@ -266,7 +266,7 @@ module.exports = function(io) {
               const task = sessionResult.Item?.currentTask || 'Coding task';
               
               // Generate AI summary
-              const summary = await generateCodeSummary(task, code);
+              const summary = await evaluateSubmission(task, code);
               
               // Store summary with student data
               await docClient.update({
@@ -609,7 +609,7 @@ ${code}
           try {
             // Generate new summary
             // Note: Fixed order of parameters (task first, code second)
-            const summary = await generateCodeSummary(task, studentData.code);
+            const summary = await evaluateSubmission(task, studentData.code);
             
             // Update in database
             await docClient.update({
