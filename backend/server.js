@@ -5,9 +5,8 @@ const cors = require('cors');
 const { configureDB, setupTables } = require('./db');
 require('dotenv').config();
 
-// Import routes
+// Import routes - removed userRouter
 const sessionRouter = require('./sessionRouter');
-const userRouter = require('./routes/userRoutes');
 
 // Create Express app and HTTP server
 const app = express();
@@ -26,9 +25,8 @@ const { docClient: ddb } = configureDB();
 app.use(cors());
 app.use(express.json());
 
-// API routes
+// API routes - removed userRouter route
 app.use('/api/sessions', sessionRouter);
-app.use('/api/users', userRouter);
 
 // Setup Socket.IO for live coding
 require('./liveCode')(io);

@@ -1,18 +1,16 @@
-const CodeSummary = require('../models/codeSummary');
-const Session = require('../models/session');
+const { Session, CodeSummary } = require('./db');
 
 /**
  * Get all code summaries for a session
- * @route GET /api/sessions/:id/summaries
- * @access Private (Teacher only)
+ * @route GET /api/sessions/:sessionCode/summaries
+ * @access Public (Teacher only with session code)
  */
 exports.getSessionSummaries = async (req, res) => {
   try {
-    const sessionId = req.params.id;
-    const userId = req.user.id;
+    const sessionCode = req.params.sessionCode;
     
-    // Verify the user is the teacher of this session
-    const sessionResult = await Session.getById(sessionId);
+    // Verify the session exists
+    const sessionResult = await Session.getById(sessionCode);
     if (!sessionResult || !sessionResult.Item) {
       return res.status(404).json({
         success: false,
@@ -20,15 +18,8 @@ exports.getSessionSummaries = async (req, res) => {
       });
     }
     
-    if (sessionResult.Item.createdBy !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Only the teacher can access all summaries'
-      });
-    }
-    
     // Get all summaries for this session
-    const summariesResult = await CodeSummary.getBySessionId(sessionId);
+    const summariesResult = await CodeSummary.getBySessionId(sessionCode);
     
     res.status(200).json({
       success: true,
@@ -46,17 +37,16 @@ exports.getSessionSummaries = async (req, res) => {
 
 /**
  * Get summaries for a specific student in a session
- * @route GET /api/sessions/:id/users/:userId/summaries
- * @access Private (Teacher or the student themselves)
+ * @route GET /api/sessions/:sessionCode/students/:studentName/summaries
+ * @access Public (With session code)
  */
 exports.getStudentSummaries = async (req, res) => {
   try {
-    const sessionId = req.params.id;
-    const targetUserId = req.params.userId;
-    const requestingUserId = req.user.id;
+    const sessionCode = req.params.sessionCode;
+    const studentName = req.params.studentName;
     
     // Verify the session exists
-    const sessionResult = await Session.getById(sessionId);
+    const sessionResult = await Session.getById(sessionCode);
     if (!sessionResult || !sessionResult.Item) {
       return res.status(404).json({
         success: false,
@@ -64,17 +54,16 @@ exports.getStudentSummaries = async (req, res) => {
       });
     }
     
-    // Check authorization - either teacher or the student themselves
-    if (requestingUserId !== sessionResult.Item.createdBy && 
-        requestingUserId !== targetUserId) {
-      return res.status(403).json({
+    // Check if student exists in session
+    if (!sessionResult.Item.students || !sessionResult.Item.students[studentName]) {
+      return res.status(404).json({
         success: false,
-        message: 'Not authorized to access these summaries'
+        message: 'Student not found in this session'
       });
     }
     
     // Get summaries for this student in this session
-    const summariesResult = await CodeSummary.getByStudentInSession(sessionId, targetUserId);
+    const summariesResult = await CodeSummary.getByStudentInSession(sessionCode, studentName);
     
     res.status(200).json({
       success: true,
@@ -106,17 +95,16 @@ function generateRandomLowercase(length = 6) {
 }
 
 /**
- * Generate a unique session ID that is 6 lowercase letters long.
+ * Generate a unique session code that is 6 lowercase letters long.
  * This function checks the database to ensure that the generated code
  * does not already exist.
  * @returns {Promise<string>}
  */
-async function generateUniqueSessionId() {
+async function generateUniqueSessionCode() {
   let code;
   let exists = true;
   do {
     code = generateRandomLowercase(6);
-    // Assuming Session.getById returns a result with an "Item" property if found.
     const result = await Session.getById(code);
     if (!result || !result.Item) {
       exists = false;
@@ -127,41 +115,39 @@ async function generateUniqueSessionId() {
 
 /**
  * Create a new session.
- * @route POST /api/sessions
- * @access Private
+ * @route POST /api/sessions/create
+ * @access Public
  */
 exports.createSession = async (req, res) => {
   try {
     const { title, description, language, initialCode } = req.body;
-    const userId = req.user.id; // Assuming auth middleware populates req.user
 
-    // Generate a unique session ID (6 lowercase letters).
-    const sessionId = await generateUniqueSessionId();
+    // Generate a unique session code (6 lowercase letters)
+    const sessionCode = await generateUniqueSessionCode();
 
-    // Prepare session data with added fields for live updates.
+    // Prepare session data with added fields for live updates
     const sessionData = {
-      sessionId,
-      title,
-      description,
+      sessionCode,
+      title: title || 'Coding Session',
+      description: description || 'Interactive coding session',
       language: language || 'javascript',
       initialCode: initialCode || '',
-      currentCode: initialCode || '',  // For live code updates.
-      slides: [],                      // Array to store slide data.
-      currentSlide: 0,                 // Current slide index.
-      createdBy: userId,
+      currentCode: initialCode || '',  // For live code updates
+      slides: [],                      // Array to store slide data
+      currentSlide: 0,                 // Current slide index
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-      participants: [userId],
-      isActive: true
+      students: {},                   // Will store student data
+      active: true
     };
 
-    // Create the session in the database.
+    // Create the session in the database
     await Session.create(sessionData);
 
-    // Send success response.
+    // Send success response
     res.status(201).json({
       success: true,
-      sessionId,
+      sessionCode,
       message: 'Session created successfully'
     });
   } catch (error) {
@@ -175,14 +161,14 @@ exports.createSession = async (req, res) => {
 };
 
 /**
- * Get session by ID.
- * @route GET /api/sessions/:id
- * @access Private
+ * Get session by code
+ * @route GET /api/sessions/:sessionCode
+ * @access Public
  */
-exports.getSessionById = async (req, res) => {
+exports.getSessionByCode = async (req, res) => {
   try {
-    const { id } = req.params;
-    const result = await Session.getById(id);
+    const { sessionCode } = req.params;
+    const result = await Session.getById(sessionCode);
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
@@ -204,30 +190,27 @@ exports.getSessionById = async (req, res) => {
 };
 
 /**
- * Update session.
- * @route PUT /api/sessions/:id
- * @access Private
+ * Update session information
+ * @route PUT /api/sessions/:sessionCode
+ * @access Public (Teacher with correct session code)
  */
 exports.updateSession = async (req, res) => {
   try {
-    const { id } = req.params;
+    const { sessionCode } = req.params;
     const updates = req.body;
-    const userId = req.user.id;
-
-    const result = await Session.getById(id);
+    
+    // Check if session exists
+    const result = await Session.getById(sessionCode);
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
         message: 'Session not found'
       });
     }
-    if (result.Item.createdBy !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to update this session'
-      });
-    }
-    await Session.update(id, updates);
+    
+    // Apply updates
+    await Session.update(sessionCode, updates);
+    
     res.status(200).json({
       success: true,
       message: 'Session updated successfully'
@@ -243,29 +226,25 @@ exports.updateSession = async (req, res) => {
 };
 
 /**
- * Delete session.
- * @route DELETE /api/sessions/:id
- * @access Private
+ * Delete session
+ * @route DELETE /api/sessions/:sessionCode
+ * @access Public (Teacher with correct session code)
  */
 exports.deleteSession = async (req, res) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const result = await Session.getById(id);
+    const { sessionCode } = req.params;
+    
+    // Check if session exists
+    const result = await Session.getById(sessionCode);
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
         message: 'Session not found'
       });
     }
-    if (result.Item.createdBy !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to delete this session'
-      });
-    }
-    await Session.delete(id);
+    
+    await Session.delete(sessionCode);
+    
     res.status(200).json({
       success: true,
       message: 'Session deleted successfully'
@@ -281,55 +260,40 @@ exports.deleteSession = async (req, res) => {
 };
 
 /**
- * Get all sessions for a user.
- * @route GET /api/sessions
- * @access Private
- */
-exports.getUserSessions = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const result = await Session.getByUser(userId);
-    res.status(200).json({
-      success: true,
-      sessions: (result.Items && result.Items.length ? result.Items : [])
-    });
-  } catch (error) {
-    console.error('Get User Sessions Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to retrieve user sessions',
-      error: error.message
-    });
-  }
-};
-
-/**
- * Join an existing session.
- * @route POST /api/sessions/:id/join
- * @access Private
+ * Join an existing session as a student
+ * @route POST /api/sessions/:sessionCode/join
+ * @access Public
  */
 exports.joinSession = async (req, res) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
+    const { sessionCode } = req.params;
+    const { studentName } = req.body;
+    
+    if (!studentName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Student name is required'
+      });
+    }
 
-    const result = await Session.getById(id);
+    const result = await Session.getById(sessionCode);
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
         message: 'Session not found'
       });
     }
-    if (!result.Item.isActive) {
+    
+    if (!result.Item.active) {
       return res.status(400).json({
         success: false,
         message: 'This session is no longer active'
       });
     }
-    // Add user to participants if not already present.
-    if (!result.Item.participants.includes(userId)) {
-      await Session.addParticipant(id, userId);
-    }
+    
+    // Add student to session
+    await Session.addParticipant(sessionCode, studentName);
+    
     res.status(200).json({
       success: true,
       message: 'Joined session successfully',
@@ -346,29 +310,24 @@ exports.joinSession = async (req, res) => {
 };
 
 /**
- * End an active session.
- * @route PUT /api/sessions/:id/end
- * @access Private
+ * End an active session
+ * @route PUT /api/sessions/:sessionCode/end
+ * @access Public (Teacher with session code)
  */
 exports.endSession = async (req, res) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const result = await Session.getById(id);
+    const { sessionCode } = req.params;
+    
+    const result = await Session.getById(sessionCode);
     if (!result || !result.Item) {
       return res.status(404).json({
         success: false,
         message: 'Session not found'
       });
     }
-    if (result.Item.createdBy !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Not authorized to end this session'
-      });
-    }
-    await Session.update(id, { isActive: false });
+    
+    await Session.update(sessionCode, { active: false });
+    
     res.status(200).json({
       success: true,
       message: 'Session ended successfully'
@@ -378,6 +337,39 @@ exports.endSession = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to end session',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Update current slide for a session
+ * @route PUT /api/sessions/:sessionCode/slide/:slideIndex
+ * @access Public (Teacher with session code)
+ */
+exports.updateCurrentSlide = async (req, res) => {
+  try {
+    const { sessionCode, slideIndex } = req.params;
+    
+    const result = await Session.getById(sessionCode);
+    if (!result || !result.Item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Session not found'
+      });
+    }
+    
+    await Session.updateCurrentSlide(sessionCode, parseInt(slideIndex, 10));
+    
+    res.status(200).json({
+      success: true,
+      message: 'Current slide updated successfully'
+    });
+  } catch (error) {
+    console.error('Update Slide Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update current slide',
       error: error.message
     });
   }

@@ -1,9 +1,20 @@
 const AWS = require('aws-sdk');
 const { VM } = require('vm2');
+const { addStudentToSession, updateStudentCode, updateCurrentSlide } = require('./sessionManager');
 
 // Configure AWS
 AWS.config.update({ region: process.env.AWS_REGION || 'us-east-1' });
 const docClient = new AWS.DynamoDB.DocumentClient();
+
+// Import AI summary functionality (to be implemented)
+let generateCodeSummary;
+try {
+  const AISummary = require('./AIsummery');
+  generateCodeSummary = AISummary.generateCodeSummary;
+} catch (error) {
+  console.warn('AI summary module not found or incomplete, summaries will be disabled');
+  generateCodeSummary = async () => ({ summary: 'No summary available', progress: 'unknown' });
+}
 
 /**
  * Configure Socket.IO events for live coding
@@ -12,6 +23,9 @@ const docClient = new AWS.DynamoDB.DocumentClient();
 module.exports = function(io) {
   // Namespace for coding sessions
   const codeIO = io.of('/code');
+  
+  // Track periodic summary updates
+  const summaryTimers = new Map();
   
   codeIO.on('connection', (socket) => {
     console.log(`New code socket connected: ${socket.id}`);
@@ -40,18 +54,16 @@ module.exports = function(io) {
           isTeacher: false // Students join via session code
         };
         
-        // Update DynamoDB to track student
-        const socketId = socket.id;
-        await docClient.update({
-          TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
-          Key: { sessionCode },
-          UpdateExpression: 'SET students.#name = :socketId',
-          ExpressionAttributeNames: { '#name': name },
-          ExpressionAttributeValues: { ':socketId': socketId }
-        }).promise();
+        // Update DynamoDB with student data using session manager
+        await addStudentToSession(sessionCode, name, socket.id);
         
         // Send current session data to the joining user
         socket.emit('session-data', result.Item);
+        
+        // Send current slide to newly joined student
+        socket.emit('slide-change', {
+          index: result.Item.currentSlide || 0
+        });
         
         // Notify others that someone joined
         socket.to(sessionCode).emit('user-joined', {
@@ -80,6 +92,19 @@ module.exports = function(io) {
         };
         
         console.log(`Teacher ${name} joined session ${sessionCode}`);
+        
+        // Start periodic summary updates when teacher joins
+        if (!summaryTimers.has(sessionCode)) {
+          const timer = setInterval(async () => {
+            try {
+              await updateStudentSummaries(sessionCode);
+            } catch (error) {
+              console.error('Error updating summaries:', error);
+            }
+          }, 30000); // Update summaries every 30 seconds
+          
+          summaryTimers.set(sessionCode, timer);
+        }
       } catch (error) {
         console.error('Error with teacher join:', error);
         socket.emit('error', { message: 'Failed to join as teacher' });
@@ -91,21 +116,68 @@ module.exports = function(io) {
       try {
         const { code } = data;
         const sessionCode = socket.data?.sessionCode;
+        const name = socket.data?.name;
         
-        if (!sessionCode) {
+        if (!sessionCode || !name) {
           socket.emit('error', { message: 'Not in a session' });
           return;
         }
         
-        // Broadcast to others in the same session
-        socket.to(sessionCode).emit('code-update', {
-          code,
-          name: socket.data.name,
-          timestamp: new Date().toISOString()
-        });
-        
-        // Update in database if this is from teacher
-        if (socket.data.isTeacher) {
+        // Broadcast to teacher only if from student
+        if (!socket.data.isTeacher) {
+          // Update student code in database
+          await updateStudentCode(sessionCode, name, code);
+          
+          // Get teacher sockets in this session
+          const teacherSockets = await codeIO.in(sessionCode).fetchSockets();
+          const teachers = teacherSockets.filter(s => s.data?.isTeacher);
+          
+          // Send code update only to teachers
+          teachers.forEach(teacher => {
+            teacher.emit('student-code-update', {
+              studentName: name,
+              code,
+              timestamp: new Date().toISOString()
+            });
+          });
+          
+          // Generate updated summary if code changed significantly
+          if (code.length > 10) {
+            try {
+              // Get session to find task description
+              const sessionResult = await docClient.get({
+                TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+                Key: { sessionCode }
+              }).promise();
+              
+              const task = sessionResult.Item?.currentTask || 'Coding task';
+              
+              // Generate AI summary
+              const summary = await generateCodeSummary(code, task);
+              
+              // Store summary with student data
+              await docClient.update({
+                TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+                Key: { sessionCode },
+                UpdateExpression: 'SET students.#name.summary = :summary',
+                ExpressionAttributeNames: { '#name': name },
+                ExpressionAttributeValues: { ':summary': summary }
+              }).promise();
+              
+              // Send to teachers
+              teachers.forEach(teacher => {
+                teacher.emit('student-summary-update', {
+                  studentName: name,
+                  summary,
+                  timestamp: new Date().toISOString()
+                });
+              });
+            } catch (summaryError) {
+              console.error('Error generating summary:', summaryError);
+            }
+          }
+        } else {
+          // If from teacher, update in database
           await docClient.update({
             TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
             Key: { sessionCode },
@@ -115,6 +187,31 @@ module.exports = function(io) {
         }
       } catch (error) {
         console.error('Error handling code update:', error);
+      }
+    });
+    
+    // Teacher updates current slide
+    socket.on('update-slide', async (data) => {
+      try {
+        const { slideIndex } = data;
+        const sessionCode = socket.data?.sessionCode;
+        
+        if (!sessionCode || !socket.data.isTeacher) {
+          socket.emit('error', { message: 'Not authorized to change slides' });
+          return;
+        }
+        
+        // Update slide in database
+        await updateCurrentSlide(sessionCode, slideIndex);
+        
+        // Broadcast slide change to all users in the session
+        codeIO.to(sessionCode).emit('slide-change', {
+          index: slideIndex,
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        console.error('Error updating slide:', error);
+        socket.emit('error', { message: 'Failed to update slide' });
       }
     });
     
@@ -135,17 +232,19 @@ module.exports = function(io) {
     
     // Code execution request
     socket.on('execute-code', async (data) => {
-      const { code, language } = data;
-      const sessionCode = socket.data?.sessionCode;
-      
-      if (!sessionCode) {
-        socket.emit('error', { message: 'Not in a session' });
-        return;
-      }
-      
       try {
+        const { code, language } = data;
+        const sessionCode = socket.data?.sessionCode;
+        const name = socket.data?.name;
+        
+        if (!sessionCode || !name) {
+          socket.emit('error', { message: 'Not in a session' });
+          return;
+        }
+        
         // Execute code (currently supports JavaScript only)
         let result = 'Code execution not implemented for this language';
+        let error = null;
         
         if (language === 'javascript') {
           try {
@@ -158,16 +257,49 @@ module.exports = function(io) {
             result = vm.run(code);
             result = String(result);
           } catch (execError) {
-            result = `Error: ${execError.message}`;
+            error = execError.message;
+            result = `Error: ${error}`;
           }
         }
         
-        // Send execution result to everyone in the session
-        codeIO.to(sessionCode).emit('execution-result', {
+        // Store execution result
+        await docClient.update({
+          TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+          Key: { sessionCode },
+          UpdateExpression: 'SET students.#name.lastExecution = :exec',
+          ExpressionAttributeNames: { '#name': name },
+          ExpressionAttributeValues: { 
+            ':exec': {
+              result,
+              error,
+              timestamp: new Date().toISOString()
+            }
+          }
+        }).promise();
+        
+        // Send result to the student who executed the code
+        socket.emit('execution-result', {
           result,
-          name: socket.data.name,
+          error,
           timestamp: new Date().toISOString()
         });
+        
+        // If this is a student, also send to teacher
+        if (!socket.data.isTeacher) {
+          // Get teacher sockets in this session
+          const teacherSockets = await codeIO.in(sessionCode).fetchSockets();
+          const teachers = teacherSockets.filter(s => s.data?.isTeacher);
+          
+          // Send execution result to teachers
+          teachers.forEach(teacher => {
+            teacher.emit('student-execution-result', {
+              studentName: name,
+              result,
+              error,
+              timestamp: new Date().toISOString()
+            });
+          });
+        }
       } catch (error) {
         console.error('Code execution error:', error);
         socket.emit('error', { message: 'Code execution failed' });
@@ -177,7 +309,7 @@ module.exports = function(io) {
     // User leaves or disconnects
     socket.on('disconnect', async () => {
       try {
-        const { sessionCode, name } = socket.data || {};
+        const { sessionCode, name, isTeacher } = socket.data || {};
         console.log(`Socket disconnected: ${socket.id}, User: ${name || 'Unknown'}`);
         
         if (sessionCode && name) {
@@ -187,8 +319,21 @@ module.exports = function(io) {
             timestamp: new Date().toISOString()
           });
           
-          // Remove from students list if not teacher
-          if (!socket.data.isTeacher) {
+          // Special handling for teacher disconnect
+          if (isTeacher) {
+            // Check if this was the last teacher
+            const remainingSockets = await codeIO.in(sessionCode).fetchSockets();
+            const remainingTeachers = remainingSockets.filter(s => 
+              s.data?.isTeacher && s.id !== socket.id
+            );
+            
+            // If no teachers left, clear summary timer
+            if (remainingTeachers.length === 0 && summaryTimers.has(sessionCode)) {
+              clearInterval(summaryTimers.get(sessionCode));
+              summaryTimers.delete(sessionCode);
+            }
+          } else {
+            // Remove student from session if not teacher
             await docClient.update({
               TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
               Key: { sessionCode },
@@ -202,6 +347,60 @@ module.exports = function(io) {
       }
     });
   });
+  
+  /**
+   * Update summaries for all students in a session
+   * @param {string} sessionCode - The session code
+   */
+  async function updateStudentSummaries(sessionCode) {
+    try {
+      // Get session data
+      const result = await docClient.get({
+        TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+        Key: { sessionCode }
+      }).promise();
+      
+      if (!result.Item || !result.Item.students) return;
+      
+      const task = result.Item.currentTask || 'Coding task';
+      const students = result.Item.students;
+      
+      // Process each student
+      for (const [studentName, studentData] of Object.entries(students)) {
+        if (studentData.code) {
+          try {
+            // Generate new summary
+            const summary = await generateCodeSummary(studentData.code, task);
+            
+            // Update in database
+            await docClient.update({
+              TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+              Key: { sessionCode },
+              UpdateExpression: 'SET students.#name.summary = :summary',
+              ExpressionAttributeNames: { '#name': studentName },
+              ExpressionAttributeValues: { ':summary': summary }
+            }).promise();
+            
+            // Broadcast to teachers
+            const teacherSockets = await codeIO.in(sessionCode).fetchSockets();
+            const teachers = teacherSockets.filter(s => s.data?.isTeacher);
+            
+            teachers.forEach(teacher => {
+              teacher.emit('student-summary-update', {
+                studentName,
+                summary,
+                timestamp: new Date().toISOString()
+              });
+            });
+          } catch (error) {
+            console.error(`Error updating summary for ${studentName}:`, error);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in updateStudentSummaries:', error);
+    }
+  }
   
   return codeIO;
 };

@@ -91,4 +91,168 @@ const setupTables = async () => {
   }
 };
 
-module.exports = { configureDB, setupTables };
+// Session model for sessionController references
+const Session = {
+  // Get session by sessionCode
+  getById: async (sessionCode) => {
+    const { docClient } = configureDB();
+    return docClient.get({
+      TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+      Key: { sessionCode }
+    }).promise();
+  },
+  
+  // Create a new session
+  create: async (sessionData) => {
+    const { docClient } = configureDB();
+    return docClient.put({
+      TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+      Item: sessionData
+    }).promise();
+  },
+  
+  // Update an existing session
+  update: async (sessionCode, updates) => {
+    const { docClient } = configureDB();
+    
+    // Build the update expression dynamically
+    let updateExpression = 'SET ';
+    const expressionAttributeNames = {};
+    const expressionAttributeValues = {};
+    
+    Object.entries(updates).forEach(([key, value], index) => {
+      const attrName = `#attr${index}`;
+      const attrValue = `:val${index}`;
+      
+      updateExpression += `${index > 0 ? ', ' : ''}${attrName} = ${attrValue}`;
+      expressionAttributeNames[attrName] = key;
+      expressionAttributeValues[attrValue] = value;
+    });
+    
+    return docClient.update({
+      TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+      Key: { sessionCode },
+      UpdateExpression: updateExpression,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues
+    }).promise();
+  },
+  
+  // Add participant to session
+  addParticipant: async (sessionCode, studentName) => {
+    const { docClient } = configureDB();
+    return docClient.update({
+      TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+      Key: { sessionCode },
+      UpdateExpression: 'SET students.#name = if_not_exists(students.#name, :emptyObj)',
+      ExpressionAttributeNames: { '#name': studentName },
+      ExpressionAttributeValues: { ':emptyObj': { joinedAt: new Date().toISOString() } }
+    }).promise();
+  },
+  
+  // Update student data (code, summary, etc.)
+  updateStudentData: async (sessionCode, studentName, updates) => {
+    const { docClient } = configureDB();
+    
+    const updateExpressions = [];
+    const expressionAttributeNames = { '#student': studentName };
+    const expressionAttributeValues = {};
+    
+    Object.entries(updates).forEach(([key, value], index) => {
+      const keyName = `#key${index}`;
+      const valueName = `:val${index}`;
+      updateExpressions.push(`students.#student.${keyName} = ${valueName}`);
+      expressionAttributeNames[keyName] = key;
+      expressionAttributeValues[valueName] = value;
+    });
+    
+    return docClient.update({
+      TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+      Key: { sessionCode },
+      UpdateExpression: `SET ${updateExpressions.join(', ')}`,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues
+    }).promise();
+  },
+  
+  // Update current slide
+  updateCurrentSlide: async (sessionCode, slideIndex) => {
+    const { docClient } = configureDB();
+    return docClient.update({
+      TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+      Key: { sessionCode },
+      UpdateExpression: 'SET currentSlide = :slide',
+      ExpressionAttributeValues: { ':slide': slideIndex }
+    }).promise();
+  },
+  
+  // Delete a session
+  delete: async (sessionCode) => {
+    const { docClient } = configureDB();
+    return docClient.delete({
+      TableName: process.env.SESSIONS_TABLE || 'CodingSessions',
+      Key: { sessionCode }
+    }).promise();
+  },
+  
+  // Get sessions by user ID for future auth implementation if needed
+  getByUser: async (userId) => {
+    const { docClient } = configureDB();
+    // This would typically use a GSI in a real implementation
+    return { Items: [] }; // Placeholder return for no-auth version
+  }
+};
+
+// CodeSummary model for sessionController references
+const CodeSummary = {
+  create: async (summaryData) => {
+    const { docClient } = configureDB();
+    return docClient.put({
+      TableName: process.env.SUMMARIES_TABLE || 'CodeSummaries',
+      Item: {
+        id: Date.now().toString(),
+        createdAt: new Date().toISOString(),
+        ...summaryData
+      }
+    }).promise();
+  },
+  
+  getById: async (id) => {
+    const { docClient } = configureDB();
+    return docClient.get({
+      TableName: process.env.SUMMARIES_TABLE || 'CodeSummaries',
+      Key: { id }
+    }).promise();
+  },
+  
+  getBySessionId: async (sessionCode) => {
+    const { docClient } = configureDB();
+    return docClient.query({
+      TableName: process.env.SUMMARIES_TABLE || 'CodeSummaries',
+      IndexName: 'SessionCodeIndex',
+      KeyConditionExpression: 'sessionCode = :code',
+      ExpressionAttributeValues: { ':code': sessionCode }
+    }).promise();
+  },
+  
+  getByStudentInSession: async (sessionCode, studentName) => {
+    const { docClient } = configureDB();
+    return docClient.query({
+      TableName: process.env.SUMMARIES_TABLE || 'CodeSummaries',
+      IndexName: 'SessionCodeIndex',
+      KeyConditionExpression: 'sessionCode = :code',
+      FilterExpression: 'studentName = :name',
+      ExpressionAttributeValues: { 
+        ':code': sessionCode,
+        ':name': studentName 
+      }
+    }).promise();
+  }
+};
+
+module.exports = { 
+  configureDB, 
+  setupTables,
+  Session,
+  CodeSummary 
+};
