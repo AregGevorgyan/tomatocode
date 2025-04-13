@@ -287,6 +287,26 @@ module.exports = function(io) {
             result = `Error: ${error}`;
           }
         }
+
+        // for python execution
+        if (language === 'python') {
+          try {
+            // Write code to temp file
+            const tempFile = `/tmp/${uuidv4()}.py`;
+            fs.writeFileSync(tempFile, code);
+            
+            // Execute with timeout
+            const { stdout, stderr } = await execPromise(`python ${tempFile}`, { timeout: 5000 });
+            result = stdout;
+            if (stderr) error = stderr;
+            
+            // Clean up
+            fs.unlinkSync(tempFile);
+          } catch (execError) {
+            error = execError.message;
+            result = `Error: ${error}`;
+          }
+        }
         
         // Store execution result
         await docClient.update({
